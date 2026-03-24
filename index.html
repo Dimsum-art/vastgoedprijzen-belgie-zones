@@ -1,0 +1,239 @@
+<!DOCTYPE html>
+<html lang="nl">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Vastgoedprijzen per m2 — Belgie (per statistische sector)</title>
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { font-family: 'Segoe UI', system-ui, -apple-system, sans-serif; }
+
+        #header {
+            background: #1a1a2e;
+            color: #fff;
+            padding: 14px 24px;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            flex-wrap: wrap;
+            gap: 8px;
+        }
+        #header h1 { font-size: 1.3rem; font-weight: 600; letter-spacing: -0.3px; }
+        #header .source { font-size: 0.75rem; color: #8888aa; }
+
+        #map { height: calc(100vh - 52px); width: 100%; }
+
+        .info {
+            padding: 10px 14px;
+            background: rgba(255, 255, 255, 0.93);
+            backdrop-filter: blur(10px);
+            box-shadow: 0 2px 16px rgba(0, 0, 0, 0.12);
+            border-radius: 10px;
+            font-size: 13px;
+            line-height: 1.5;
+            min-width: 220px;
+        }
+        .info h4 { margin: 0 0 4px; color: #666; font-size: 11px; text-transform: uppercase; letter-spacing: 0.5px; }
+        .info .name { font-size: 17px; font-weight: 700; color: #1a1a2e; }
+        .info .price { font-size: 22px; font-weight: 800; margin: 4px 0 2px; }
+        .info .municipality { font-size: 12px; color: #555; margin-top: 2px; }
+        .info .sector-code { font-size: 10px; color: #aaa; font-family: monospace; }
+        .info .no-data { color: #aaa; font-style: italic; }
+        .info .hint { color: #999; font-size: 12px; }
+
+        .legend {
+            padding: 10px 14px;
+            background: rgba(255, 255, 255, 0.93);
+            backdrop-filter: blur(10px);
+            box-shadow: 0 2px 16px rgba(0, 0, 0, 0.12);
+            border-radius: 10px;
+            line-height: 24px;
+            font-size: 12px;
+            color: #444;
+        }
+        .legend h4 { margin: 0 0 6px; font-size: 11px; color: #666; text-transform: uppercase; letter-spacing: 0.5px; }
+        .legend i {
+            width: 20px; height: 13px;
+            display: inline-block;
+            margin-right: 6px;
+            border-radius: 2px;
+            vertical-align: middle;
+            border: 1px solid rgba(0,0,0,0.08);
+        }
+
+        #loading {
+            position: absolute;
+            top: 50%; left: 50%;
+            transform: translate(-50%, -50%);
+            z-index: 1000;
+            background: rgba(255,255,255,0.95);
+            padding: 24px 40px;
+            border-radius: 12px;
+            box-shadow: 0 4px 24px rgba(0,0,0,0.15);
+            font-size: 15px;
+            color: #333;
+        }
+        #loading.hidden { display: none; }
+
+        @media (max-width: 600px) {
+            #header h1 { font-size: 1rem; }
+            #header { padding: 10px 16px; }
+            #map { height: calc(100vh - 44px); }
+            .info { min-width: 160px; font-size: 12px; }
+            .info .name { font-size: 14px; }
+            .info .price { font-size: 18px; }
+        }
+    </style>
+</head>
+<body>
+    <div id="header">
+        <h1>Vastgoedprijzen per m2 — Belgie (per statistische sector)</h1>
+        <span class="source">Bron: Statbel (2019-2023) | Schatting woonoppervlakte</span>
+    </div>
+    <div id="map">
+        <div id="loading">Kaart laden (~20.000 zones)...</div>
+    </div>
+
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+    <script src="https://unpkg.com/topojson-client@3"></script>
+    <script>
+        // --- Map with canvas renderer for 20k polygon performance ---
+        const map = L.map('map', {
+            center: [50.5, 4.35],
+            zoom: 8,
+            minZoom: 7,
+            maxZoom: 15,
+            preferCanvas: true
+        });
+
+        L.tileLayer('https://{s}.basemaps.cartocdn.com/light_nolabels/{z}/{x}/{y}{r}.png', {
+            attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OSM</a> &copy; <a href="https://carto.com/">CARTO</a>',
+            subdomains: 'abcd'
+        }).addTo(map);
+
+        // Labels on top of choropleth
+        L.tileLayer('https://{s}.basemaps.cartocdn.com/light_only_labels/{z}/{x}/{y}{r}.png', {
+            subdomains: 'abcd',
+            pane: 'shadowPane'
+        }).addTo(map);
+
+        // --- 4-color scheme (user specified) ---
+        const BRACKETS = [
+            { min: 0,    max: 2000, color: '#3b82f6', label: '< 2.000' },      // blue
+            { min: 2000, max: 2800, color: '#f59e0b', label: '2.000 - 2.800' }, // orange
+            { min: 2800, max: 4000, color: '#22c55e', label: '2.800 - 4.000' }, // green
+            { min: 4000, max: Infinity, color: '#ef4444', label: '> 4.000' }     // red
+        ];
+
+        function getColor(price) {
+            for (const b of BRACKETS) {
+                if (price >= b.min && price < b.max) return b.color;
+            }
+            return BRACKETS[BRACKETS.length - 1].color;
+        }
+
+        function fmt(price) {
+            return new Intl.NumberFormat('nl-BE', {
+                style: 'currency', currency: 'EUR', maximumFractionDigits: 0
+            }).format(price);
+        }
+
+        // --- Info panel (top-right) ---
+        const info = L.control({ position: 'topright' });
+        info.onAdd = function () {
+            this._div = L.DomUtil.create('div', 'info');
+            this.update();
+            return this._div;
+        };
+        info.update = function (props, price) {
+            if (props) {
+                const sectorName = props.sector_name || 'Onbekend';
+                const municipality = props.municipality_nl || props.municipality_fr || '';
+                const code = props.sector_code || '';
+                const priceHtml = price != null
+                    ? `<div class="price" style="color:${getColor(price)}">${fmt(price)}/m2</div>`
+                    : '<div class="no-data">Geen data beschikbaar</div>';
+                this._div.innerHTML =
+                    `<h4>Statistische sector</h4>
+                     <div class="name">${sectorName}</div>
+                     ${priceHtml}
+                     <div class="municipality">${municipality}</div>
+                     <div class="sector-code">${code}</div>`;
+            } else {
+                this._div.innerHTML = '<span class="hint">Beweeg over een zone</span>';
+            }
+        };
+        info.addTo(map);
+
+        // --- Legend (bottom-right) ---
+        const legend = L.control({ position: 'bottomright' });
+        legend.onAdd = function () {
+            const div = L.DomUtil.create('div', 'legend');
+            div.innerHTML = '<h4>Prijs per m2 (woonoppervlakte)</h4>';
+            for (const b of BRACKETS) {
+                div.innerHTML += `<i style="background:${b.color}"></i> ${b.label} EUR<br>`;
+            }
+            return div;
+        };
+        legend.addTo(map);
+
+        // --- Load TopoJSON + price data, render choropleth ---
+        let geojsonLayer;
+
+        Promise.all([
+            fetch('data/sectors.topojson').then(r => r.json()),
+            fetch('data/prices.json').then(r => r.json())
+        ]).then(([topo, priceData]) => {
+            const objName = Object.keys(topo.objects)[0];
+            const geojsonData = topojson.feature(topo, topo.objects[objName]);
+
+            function style(feature) {
+                const code = feature.properties.sector_code;
+                const price = priceData[code];
+                return {
+                    fillColor: price != null ? getColor(price) : '#e0e0e0',
+                    weight: 0.3,
+                    opacity: 1,
+                    color: '#ffffff',
+                    fillOpacity: 0.8
+                };
+            }
+
+            function highlightFeature(e) {
+                e.target.setStyle({ weight: 2.5, color: '#333', fillOpacity: 0.95 });
+                e.target.bringToFront();
+                const code = e.target.feature.properties.sector_code;
+                info.update(e.target.feature.properties, priceData[code]);
+            }
+
+            function resetHighlight(e) {
+                geojsonLayer.resetStyle(e.target);
+                info.update();
+            }
+
+            function zoomToFeature(e) {
+                map.fitBounds(e.target.getBounds(), { maxZoom: 14 });
+            }
+
+            geojsonLayer = L.geoJson(geojsonData, {
+                style,
+                onEachFeature: function (feature, layer) {
+                    layer.on({
+                        mouseover: highlightFeature,
+                        mouseout: resetHighlight,
+                        click: zoomToFeature
+                    });
+                }
+            }).addTo(map);
+
+            document.getElementById('loading').classList.add('hidden');
+        }).catch(err => {
+            console.error('Data load error:', err);
+            document.getElementById('loading').innerHTML =
+                '<p style="color:#c00;">Fout bij het laden van de data.<br>'
+                + '<small>Start een lokale server: <code>python3 -m http.server 8080</code></small></p>';
+        });
+    </script>
+</body>
+</html>

@@ -1,0 +1,15 @@
+__pycache__/
+*.pyc
+.venv/
+.DS_Store
+data/*.xlsx
+data/*.zip
+data/*.shp
+data/*.dbf
+data/*.shx
+data/*.prj
+data/*.cpg
+data/*.geojson
+data/*.gpkg
+data/sectors_shp/
+.pytest_cache/
