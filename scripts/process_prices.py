@@ -22,9 +22,24 @@ AVG_SIZE_M2: dict[str, float] = {
 
 RECENT_YEARS = range(2019, 2024)  # 2019-2023
 
+REQUIRED_COLUMNS = {
+    "CD_STAT_SECTOR", "CD_YEAR", "CD_TYPE",
+    "MS_P50 (MEDIAN_PRICE)", "MS_TRANSACTIONS",
+}
+
 DATA_DIR = Path(__file__).parent.parent / "data"
 XLSX_PATH = DATA_DIR / "TF_IMMO_SECTOR.xlsx"
 OUTPUT_PATH = DATA_DIR / "prices.json"
+
+
+def validate_columns(df: pd.DataFrame) -> None:
+    """Raise if expected Statbel columns are missing."""
+    missing = REQUIRED_COLUMNS - set(df.columns)
+    if missing:
+        raise ValueError(
+            f"Statbel XLSX schema changed — missing columns: {missing}. "
+            f"Available: {sorted(df.columns)}"
+        )
 
 
 def download_price_data() -> None:
@@ -186,6 +201,7 @@ if __name__ == "__main__":
     # Compute sector prices
     print("\nProcessing price data...")
     df = pd.read_excel(XLSX_PATH)
+    validate_columns(df)
     sector_prices = compute_sector_prices(df)
     print(f"  Direct sector prices: {len(sector_prices)}")
 
