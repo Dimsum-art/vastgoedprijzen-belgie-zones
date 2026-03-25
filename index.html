@@ -20,7 +20,18 @@
             gap: 8px;
         }
         #header h1 { font-size: 1.3rem; font-weight: 600; letter-spacing: -0.3px; }
+        #header .controls { display: flex; align-items: center; gap: 12px; }
         #header .source { font-size: 0.75rem; color: #8888aa; }
+        #viewSelect {
+            padding: 5px 10px;
+            border-radius: 6px;
+            border: 1px solid #444;
+            background: #16213e;
+            color: #fff;
+            font-size: 0.85rem;
+            cursor: pointer;
+        }
+        #viewSelect:focus { outline: 1px solid #6c63ff; }
 
         #map { height: calc(100vh - 52px); width: 100%; }
 
@@ -83,13 +94,21 @@
             .info { min-width: 160px; font-size: 12px; }
             .info .name { font-size: 14px; }
             .info .price { font-size: 18px; }
+            #viewSelect { font-size: 0.75rem; }
         }
     </style>
 </head>
 <body>
     <div id="header">
-        <h1>Vastgoedprijzen per m2 — Belgie (per statistische sector)</h1>
-        <span class="source">Bron: Statbel (2019-2023) | Schatting woonoppervlakte</span>
+        <h1>Vastgoedprijzen per m2 — Belgie</h1>
+        <div class="controls">
+            <select id="viewSelect">
+                <option value="woon">Woonoppervlakte (geschat)</option>
+                <option value="grond_est">Grondoppervlakte (geschat)</option>
+                <option value="grond_muni">Grondoppervlakte (gemeten)</option>
+            </select>
+        </div>
+        <span class="source" id="sourceText">Bron: Statbel sectoren (2019-2023) | Schatting woonoppervlakte</span>
     </div>
     <div id="map">
         <div id="loading">Kaart laden (~20.000 zones)...</div>
@@ -98,6 +117,53 @@
     <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
     <script src="https://unpkg.com/topojson-client@3"></script>
     <script>
+        // --- View configuration ---
+        const VIEWS = {
+            woon: {
+                label: 'Woonoppervlakte (geschat)',
+                priceKey: 'sector_code',
+                brackets: [
+                    { min: 0,    max: 2000, color: '#3b82f6', label: '< 2.000' },
+                    { min: 2000, max: 2800, color: '#f59e0b', label: '2.000 - 2.800' },
+                    { min: 2800, max: 4000, color: '#22c55e', label: '2.800 - 4.000' },
+                    { min: 4000, max: Infinity, color: '#ef4444', label: '> 4.000' }
+                ],
+                legendTitle: 'Prijs per m2 (woonoppervlakte)',
+                sourceText: 'Bron: Statbel sectoren (2019-2023) | Schatting woonoppervlakte',
+                unit: 'woonoppervlakte'
+            },
+            grond_est: {
+                label: 'Grondoppervlakte (geschat)',
+                priceKey: 'sector_code',
+                brackets: [
+                    { min: 0,    max: 800,  color: '#3b82f6', label: '< 800' },
+                    { min: 800,  max: 1200, color: '#f59e0b', label: '800 - 1.200' },
+                    { min: 1200, max: 1800, color: '#22c55e', label: '1.200 - 1.800' },
+                    { min: 1800, max: Infinity, color: '#ef4444', label: '> 1.800' }
+                ],
+                legendTitle: 'Prijs per m2 (grondoppervlakte geschat)',
+                sourceText: 'Bron: Statbel sectoren (2019-2023) | Schatting grondoppervlakte',
+                unit: 'grondoppervlakte'
+            },
+            grond_muni: {
+                label: 'Grondoppervlakte (gemeten)',
+                priceKey: 'nis5',
+                brackets: [
+                    { min: 0,   max: 150, color: '#3b82f6', label: '< 150' },
+                    { min: 150, max: 250, color: '#f59e0b', label: '150 - 250' },
+                    { min: 250, max: 500, color: '#22c55e', label: '250 - 500' },
+                    { min: 500, max: Infinity, color: '#ef4444', label: '> 500' }
+                ],
+                legendTitle: 'Prijs per m2 (grondoppervlakte gemeten)',
+                sourceText: 'Bron: Statbel gemeenten (2010-2019) | Werkelijke verkoopoppervlakte',
+                unit: 'grondoppervlakte'
+            }
+        };
+
+        let currentView = 'woon';
+        let allPrices = {};  // { woon: {...}, grond_est: {...}, grond_muni: {...} }
+        let geojsonLayer;
+
         // --- Map with canvas renderer for 20k polygon performance ---
         const map = L.map('map', {
             center: [50.5, 4.35],
@@ -118,25 +184,42 @@
             pane: 'shadowPane'
         }).addTo(map);
 
-        // --- 4-color scheme (user specified) ---
-        const BRACKETS = [
-            { min: 0,    max: 2000, color: '#3b82f6', label: '< 2.000' },      // blue
-            { min: 2000, max: 2800, color: '#f59e0b', label: '2.000 - 2.800' }, // orange
-            { min: 2800, max: 4000, color: '#22c55e', label: '2.800 - 4.000' }, // green
-            { min: 4000, max: Infinity, color: '#ef4444', label: '> 4.000' }     // red
-        ];
-
-        function getColor(price) {
-            for (const b of BRACKETS) {
+        // --- Color helpers ---
+        function getColor(price, brackets) {
+            for (const b of brackets) {
                 if (price >= b.min && price < b.max) return b.color;
             }
-            return BRACKETS[BRACKETS.length - 1].color;
+            return brackets[brackets.length - 1].color;
         }
 
         function fmt(price) {
             return new Intl.NumberFormat('nl-BE', {
                 style: 'currency', currency: 'EUR', maximumFractionDigits: 0
             }).format(price);
+        }
+
+        function getPriceForFeature(feature) {
+            const view = VIEWS[currentView];
+            const prices = allPrices[currentView];
+            if (view.priceKey === 'nis5') {
+                // Municipality-level: first 5 chars of sector_code
+                const code = feature.properties.sector_code;
+                return code ? prices[code.substring(0, 5)] : undefined;
+            }
+            return prices[feature.properties[view.priceKey]];
+        }
+
+        // --- Styling ---
+        function style(feature) {
+            const view = VIEWS[currentView];
+            const price = getPriceForFeature(feature);
+            return {
+                fillColor: price != null ? getColor(price, view.brackets) : '#e0e0e0',
+                weight: 0.3,
+                opacity: 1,
+                color: '#ffffff',
+                fillOpacity: 0.8
+            };
         }
 
         // --- Info panel (top-right) ---
@@ -148,11 +231,12 @@
         };
         info.update = function (props, price) {
             if (props) {
+                const view = VIEWS[currentView];
                 const sectorName = props.sector_name || 'Onbekend';
                 const municipality = props.municipality_nl || props.municipality_fr || '';
                 const code = props.sector_code || '';
                 const priceHtml = price != null
-                    ? `<div class="price" style="color:${getColor(price)}">${fmt(price)}/m2</div>`
+                    ? `<div class="price" style="color:${getColor(price, view.brackets)}">${fmt(price)}/m2</div>`
                     : '<div class="no-data">Geen data beschikbaar</div>';
                 this._div.innerHTML =
                     `<h4>Statistische sector</h4>
@@ -169,42 +253,76 @@
         // --- Legend (bottom-right) ---
         const legend = L.control({ position: 'bottomright' });
         legend.onAdd = function () {
-            const div = L.DomUtil.create('div', 'legend');
-            div.innerHTML = '<h4>Prijs per m2 (woonoppervlakte)</h4>';
-            for (const b of BRACKETS) {
-                div.innerHTML += `<i style="background:${b.color}"></i> ${b.label} EUR<br>`;
+            this._div = L.DomUtil.create('div', 'legend');
+            this.updateLegend();
+            return this._div;
+        };
+        legend.updateLegend = function () {
+            const view = VIEWS[currentView];
+            let html = `<h4>${view.legendTitle}</h4>`;
+            for (const b of view.brackets) {
+                html += `<i style="background:${b.color}"></i> ${b.label} EUR<br>`;
             }
-            return div;
+            this._div.innerHTML = html;
         };
         legend.addTo(map);
 
-        // --- Load TopoJSON + price data, render choropleth ---
-        let geojsonLayer;
+        // --- View switching ---
+        function switchView(viewId) {
+            if (!VIEWS[viewId] || !allPrices[viewId]) return;
+            currentView = viewId;
 
+            // Update styles (instant — no re-parse)
+            geojsonLayer.setStyle(style);
+
+            // Update legend
+            legend.updateLegend();
+
+            // Update source text
+            document.getElementById('sourceText').textContent = VIEWS[viewId].sourceText;
+
+            // Update hash
+            history.replaceState(null, '', '#' + viewId);
+
+            // Reset info panel
+            info.update();
+        }
+
+        document.getElementById('viewSelect').addEventListener('change', function () {
+            switchView(this.value);
+        });
+
+        // --- Hash routing ---
+        function readHash() {
+            const hash = location.hash.replace('#', '');
+            if (VIEWS[hash]) return hash;
+            return 'woon';
+        }
+
+        // --- Load TopoJSON + all price data, render choropleth ---
         Promise.all([
             fetch('data/sectors.topojson').then(r => r.json()),
-            fetch('data/prices.json').then(r => r.json())
-        ]).then(([topo, priceData]) => {
+            fetch('data/prices_woon.json').then(r => r.json()),
+            fetch('data/prices_grond_est.json').then(r => r.json()),
+            fetch('data/prices_grond_muni.json').then(r => r.json())
+        ]).then(([topo, pricesWoon, pricesGrondEst, pricesGrondMuni]) => {
+            allPrices.woon = pricesWoon;
+            allPrices.grond_est = pricesGrondEst;
+            allPrices.grond_muni = pricesGrondMuni;
+
+            // Set initial view from hash
+            currentView = readHash();
+            document.getElementById('viewSelect').value = currentView;
+            document.getElementById('sourceText').textContent = VIEWS[currentView].sourceText;
+
             const objName = Object.keys(topo.objects)[0];
             const geojsonData = topojson.feature(topo, topo.objects[objName]);
-
-            function style(feature) {
-                const code = feature.properties.sector_code;
-                const price = priceData[code];
-                return {
-                    fillColor: price != null ? getColor(price) : '#e0e0e0',
-                    weight: 0.3,
-                    opacity: 1,
-                    color: '#ffffff',
-                    fillOpacity: 0.8
-                };
-            }
 
             function highlightFeature(e) {
                 e.target.setStyle({ weight: 2.5, color: '#333', fillOpacity: 0.95 });
                 e.target.bringToFront();
-                const code = e.target.feature.properties.sector_code;
-                info.update(e.target.feature.properties, priceData[code]);
+                const price = getPriceForFeature(e.target.feature);
+                info.update(e.target.feature.properties, price);
             }
 
             function resetHighlight(e) {
@@ -227,12 +345,22 @@
                 }
             }).addTo(map);
 
+            // Update legend for initial view
+            legend.updateLegend();
+
             document.getElementById('loading').classList.add('hidden');
         }).catch(err => {
             console.error('Data load error:', err);
             document.getElementById('loading').innerHTML =
                 '<p style="color:#c00;">Fout bij het laden van de data.<br>'
                 + '<small>Start een lokale server: <code>python3 -m http.server 8080</code></small></p>';
+        });
+
+        // Handle back/forward with hash
+        window.addEventListener('hashchange', function () {
+            const viewId = readHash();
+            document.getElementById('viewSelect').value = viewId;
+            switchView(viewId);
         });
     </script>
 </body>

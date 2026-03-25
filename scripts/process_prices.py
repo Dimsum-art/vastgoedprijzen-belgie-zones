@@ -20,6 +20,14 @@ AVG_SIZE_M2: dict[str, float] = {
     # B00A (all houses) skipped — overlaps B001+B002
 }
 
+# Estimated average plot size (m2) per property type.
+# Sources: Statbel construction permits, regional spatial plans.
+AVG_PLOT_M2: dict[str, float] = {
+    "B001": 200.0,  # Semi-detached/terraced — small plots
+    "B002": 600.0,  # Detached — larger plots
+    "B015": 150.0,  # Apartments — shared footprint per unit
+}
+
 RECENT_YEARS = range(2019, 2024)  # 2019-2023
 
 REQUIRED_COLUMNS = {
@@ -29,7 +37,8 @@ REQUIRED_COLUMNS = {
 
 DATA_DIR = Path(__file__).parent.parent / "data"
 XLSX_PATH = DATA_DIR / "TF_IMMO_SECTOR.xlsx"
-OUTPUT_PATH = DATA_DIR / "prices.json"
+OUTPUT_WOON = DATA_DIR / "prices_woon.json"
+OUTPUT_GROND_EST = DATA_DIR / "prices_grond_est.json"
 
 
 def validate_columns(df: pd.DataFrame) -> None:
@@ -55,15 +64,18 @@ def download_price_data() -> None:
     print(f"Saved to {XLSX_PATH}")
 
 
-def compute_sector_prices(df: pd.DataFrame) -> dict[str, int]:
-    """Compute price per m2 of living space for each sector.
+def compute_sector_prices(
+    df: pd.DataFrame, size_map: dict[str, float]
+) -> dict[str, int]:
+    """Compute price per m2 for each sector using the given size map.
 
     Uses median total prices divided by estimated average property size,
     weighted by transaction count across property types and recent years.
+    Pass AVG_SIZE_M2 for woonoppervlakte, AVG_PLOT_M2 for grondoppervlakte.
     """
     mask = (
         df["CD_YEAR"].isin(RECENT_YEARS)
-        & df["CD_TYPE"].isin(AVG_SIZE_M2.keys())
+        & df["CD_TYPE"].isin(size_map.keys())
         & df["MS_P50 (MEDIAN_PRICE)"].notna()
         & (df["MS_P50 (MEDIAN_PRICE)"] > 0)
         & df["MS_TRANSACTIONS"].notna()
@@ -74,8 +86,8 @@ def compute_sector_prices(df: pd.DataFrame) -> dict[str, int]:
     if recent.empty:
         return {}
 
-    # Price per m2 of living space
-    recent["price_m2"] = recent["CD_TYPE"].map(AVG_SIZE_M2)
+    # Price per m2 using the provided size map
+    recent["price_m2"] = recent["CD_TYPE"].map(size_map)
     recent["price_m2"] = recent["MS_P50 (MEDIAN_PRICE)"] / recent["price_m2"]
 
     # Weighted average per sector
@@ -198,21 +210,29 @@ if __name__ == "__main__":
         print("WARNING: sectors.topojson not found — run process_geo.py first")
         all_sector_codes = []
 
-    # Compute sector prices
-    print("\nProcessing price data...")
     df = pd.read_excel(XLSX_PATH)
     validate_columns(df)
-    sector_prices = compute_sector_prices(df)
-    print(f"  Direct sector prices: {len(sector_prices)}")
 
-    # Fill gaps
+    # --- Woonoppervlakte (living space) ---
+    print("\nProcessing woonoppervlakte prices...")
+    woon_prices = compute_sector_prices(df, AVG_SIZE_M2)
+    print(f"  Direct sector prices: {len(woon_prices)}")
     if all_sector_codes:
-        sector_prices = fill_gaps(sector_prices, all_sector_codes)
-
-    # Write output
-    with open(OUTPUT_PATH, "w") as f:
-        json.dump(sector_prices, f, sort_keys=True)
-    print(f"\nWritten to {OUTPUT_PATH}")
-
+        woon_prices = fill_gaps(woon_prices, all_sector_codes)
+    with open(OUTPUT_WOON, "w") as f:
+        json.dump(woon_prices, f, sort_keys=True)
+    print(f"  Written to {OUTPUT_WOON}")
     if all_sector_codes:
-        print_stats(sector_prices, len(all_sector_codes))
+        print_stats(woon_prices, len(all_sector_codes))
+
+    # --- Grondoppervlakte geschat (estimated plot size) ---
+    print("\nProcessing grondoppervlakte (geschat) prices...")
+    grond_prices = compute_sector_prices(df, AVG_PLOT_M2)
+    print(f"  Direct sector prices: {len(grond_prices)}")
+    if all_sector_codes:
+        grond_prices = fill_gaps(grond_prices, all_sector_codes)
+    with open(OUTPUT_GROND_EST, "w") as f:
+        json.dump(grond_prices, f, sort_keys=True)
+    print(f"  Written to {OUTPUT_GROND_EST}")
+    if all_sector_codes:
+        print_stats(grond_prices, len(all_sector_codes))

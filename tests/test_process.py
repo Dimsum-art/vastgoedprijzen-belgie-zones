@@ -7,6 +7,7 @@ import pandas as pd
 import pytest
 
 from scripts.process_prices import (
+    AVG_PLOT_M2,
     AVG_SIZE_M2,
     compute_municipality_averages,
     compute_sector_prices,
@@ -42,7 +43,7 @@ def test_single_sector_single_type():
         "MS_P50 (MEDIAN_PRICE)": 200_000,
         "MS_TRANSACTIONS": 50,
     }])
-    result = compute_sector_prices(df)
+    result = compute_sector_prices(df, AVG_SIZE_M2)
     assert "11001A00-" in result
     assert result["11001A00-"] == round(200_000 / AVG_SIZE_M2["B015"])  # 2500
 
@@ -65,7 +66,7 @@ def test_weighted_average_across_types():
             "MS_TRANSACTIONS": 20,
         },
     ])
-    result = compute_sector_prices(df)
+    result = compute_sector_prices(df, AVG_SIZE_M2)
     # Weighted: (200000/80 * 80 + 450000/150 * 20) / (80+20)
     apt_pm2 = 200_000 / 80
     house_pm2 = 450_000 / 150
@@ -82,7 +83,7 @@ def test_excludes_unknown_sectors():
         "MS_P50 (MEDIAN_PRICE)": 200_000,
         "MS_TRANSACTIONS": 50,
     }])
-    result = compute_sector_prices(df)
+    result = compute_sector_prices(df, AVG_SIZE_M2)
     assert len(result) == 0
 
 
@@ -95,7 +96,7 @@ def test_excludes_old_years():
         "MS_P50 (MEDIAN_PRICE)": 200_000,
         "MS_TRANSACTIONS": 50,
     }])
-    result = compute_sector_prices(df)
+    result = compute_sector_prices(df, AVG_SIZE_M2)
     assert len(result) == 0
 
 
@@ -108,8 +109,39 @@ def test_excludes_unknown_property_types():
         "MS_P50 (MEDIAN_PRICE)": 200_000,
         "MS_TRANSACTIONS": 50,
     }])
-    result = compute_sector_prices(df)
+    result = compute_sector_prices(df, AVG_SIZE_M2)
     assert len(result) == 0
+
+
+# --- Tests for grondoppervlakte (estimated) ---
+
+def test_grond_est_different_from_woon():
+    """Same data with different size map should produce different prices."""
+    df = make_df([{
+        "CD_STAT_SECTOR": "11001A00-",
+        "CD_YEAR": 2022,
+        "CD_TYPE": "B002",
+        "MS_P50 (MEDIAN_PRICE)": 300_000,
+        "MS_TRANSACTIONS": 50,
+    }])
+    woon = compute_sector_prices(df, AVG_SIZE_M2)
+    grond = compute_sector_prices(df, AVG_PLOT_M2)
+    assert woon["11001A00-"] != grond["11001A00-"]
+    # B002: woon=150m2, plot=600m2 -> grond price should be lower
+    assert grond["11001A00-"] < woon["11001A00-"]
+
+
+def test_grond_est_uses_plot_sizes():
+    """Grond prices use AVG_PLOT_M2 divisor."""
+    df = make_df([{
+        "CD_STAT_SECTOR": "11001A00-",
+        "CD_YEAR": 2022,
+        "CD_TYPE": "B015",
+        "MS_P50 (MEDIAN_PRICE)": 200_000,
+        "MS_TRANSACTIONS": 50,
+    }])
+    result = compute_sector_prices(df, AVG_PLOT_M2)
+    assert result["11001A00-"] == round(200_000 / AVG_PLOT_M2["B015"])
 
 
 # --- Unit tests for compute_municipality_averages ---
@@ -165,32 +197,56 @@ def test_no_grey_zones():
         assert result[code] > 0, f"Zero price for {code}"
 
 
-# --- Integration test: real data files ---
+# --- Integration tests: real data files ---
 
-@pytest.mark.skipif(
-    not (DATA_DIR / "prices.json").exists(),
-    reason="prices.json not generated yet",
-)
-def test_prices_json_format():
-    """prices.json should have string keys and positive integer values."""
-    with open(DATA_DIR / "prices.json") as f:
+def _check_price_json(path: Path):
+    """Verify a price JSON has string keys and positive integer values."""
+    with open(path) as f:
         prices = json.load(f)
     assert len(prices) > 0
     for code, price in prices.items():
         assert isinstance(code, str), f"Key {code!r} is not a string"
         assert isinstance(price, int), f"Price for {code} is not an int"
         assert price > 0, f"Price for {code} is <= 0"
+    return prices
 
 
 @pytest.mark.skipif(
-    not (DATA_DIR / "prices.json").exists() or not (DATA_DIR / "sectors.topojson").exists(),
+    not (DATA_DIR / "prices_woon.json").exists(),
+    reason="prices_woon.json not generated yet",
+)
+def test_prices_woon_json_format():
+    """prices_woon.json should have string keys and positive integer values."""
+    _check_price_json(DATA_DIR / "prices_woon.json")
+
+
+@pytest.mark.skipif(
+    not (DATA_DIR / "prices_grond_est.json").exists(),
+    reason="prices_grond_est.json not generated yet",
+)
+def test_prices_grond_est_json_format():
+    """prices_grond_est.json should have string keys and positive integer values."""
+    _check_price_json(DATA_DIR / "prices_grond_est.json")
+
+
+@pytest.mark.skipif(
+    not (DATA_DIR / "prices_grond_muni.json").exists(),
+    reason="prices_grond_muni.json not generated yet",
+)
+def test_prices_grond_muni_json_format():
+    """prices_grond_muni.json should have string keys and positive integer values."""
+    _check_price_json(DATA_DIR / "prices_grond_muni.json")
+
+
+@pytest.mark.skipif(
+    not (DATA_DIR / "prices_woon.json").exists() or not (DATA_DIR / "sectors.topojson").exists(),
     reason="data files not generated yet",
 )
-def test_all_sectors_have_prices():
-    """Every sector in the TopoJSON must have a matching price -> no grey zones."""
+def test_all_sectors_have_woon_prices():
+    """Every sector in the TopoJSON must have a matching woon price."""
     with open(DATA_DIR / "sectors.topojson") as f:
         topo = json.load(f)
-    with open(DATA_DIR / "prices.json") as f:
+    with open(DATA_DIR / "prices_woon.json") as f:
         prices = json.load(f)
 
     obj_name = list(topo["objects"].keys())[0]
@@ -206,12 +262,12 @@ def test_all_sectors_have_prices():
 
 
 @pytest.mark.skipif(
-    not (DATA_DIR / "prices.json").exists(),
-    reason="prices.json not generated yet",
+    not (DATA_DIR / "prices_woon.json").exists(),
+    reason="prices_woon.json not generated yet",
 )
 def test_all_color_categories_present():
     """All 4 color categories should have at least some sectors."""
-    with open(DATA_DIR / "prices.json") as f:
+    with open(DATA_DIR / "prices_woon.json") as f:
         prices = json.load(f)
     vals = list(prices.values())
 

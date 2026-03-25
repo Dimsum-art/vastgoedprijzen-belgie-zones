@@ -12,4 +12,5 @@ data/*.cpg
 data/*.geojson
 data/*.gpkg
 data/sectors_shp/
+data/immo_by_municipality*.xlsx
 .pytest_cache/
